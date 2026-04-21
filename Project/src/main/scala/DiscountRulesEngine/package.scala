@@ -147,7 +147,7 @@ object Main {
   def main(args: Array[String]): Unit = {
 
     // Read the file
-    val result = read("src/main/resources/TRX10M.csv")
+    val result = read("src/main/resources/TRX1000.csv")
 
     // If transaction success, log it, calculate it's discount and get the final price
     result match {
@@ -178,17 +178,14 @@ object Main {
         dbProcess match {
           case Success(conn) =>
             logEvent("INFO", s"Successfully inserted ${discountedTransactionsOnly.length} transactions into database.")
-            println("All discounted data successfully saved to the database!")
             conn.close()
 
           case Failure(exception) =>
             logEvent("ERROR", s"Database Error: ${exception.getMessage}")
-            println(s"Database Error: ${exception.getMessage}")
         }
 
       case Failure(exception) =>
         logEvent("ERROR", s"Failed to read CSV: ${exception.getMessage}")
-        println(s"Failed to read transactions: ${exception.getMessage}")
     }
   }
 }
