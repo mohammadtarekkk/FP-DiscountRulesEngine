@@ -1,0 +1,10 @@
+.bsp/
+.idea/
+project/project
+project/target
+project/build.properties
+project/src/main/resources
+project/src/test/
+project/target/
+project/build.properties
+project/src/main/scala/temp.scala
