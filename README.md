@@ -29,7 +29,29 @@ flowchart TD
 Handling millions of transactions requires specific architectural decisions to avoid memory exhaustion and maximize CPU utilization. The engine implements the following strategies:
 
 *   **Chunking:** Reading a massive file entirely into memory is an anti-pattern that leads to OutOfMemory crashes. The `FileIO` module reads and processes the data stream in manageable chunks (e.g., 10,000 records per chunk). This keeps the memory footprint low and predictable regardless of the file size.
-*   **Parallel Processing:** Evaluating multiple rules for thousands of records is computationally expensive. The system utilizes Scala's parallel collections (`.par.map`) to distribute the workload of each chunk across all available CPU cores. This significantly reduces processing time for large batches.
+*   **Parallel Processing:** Evaluating multiple rules for thousands of records is computationally expensive. The system utilizes Scala's parallel collections (`.par.map`) to distribute the workload of each chunk across all available CPU cores. This drastically reduces processing time for large batches by executing the rules matrix simultaneously.
+
+    ```mermaid
+    flowchart TD
+        A[10,000 Row Chunk] -->|Scala .par| B(Thread Dispatcher)
+        
+        B --> C1[CPU Core 1]
+        B --> C2[CPU Core 2]
+        B --> C3[CPU Core 3]
+        B --> C4[CPU Core N]
+        
+        C1 -->|Calculate| D1{Rules 1-6}
+        C2 -->|Calculate| D2{Rules 1-6}
+        C3 -->|Calculate| D3{Rules 1-6}
+        C4 -->|Calculate| D4{Rules 1-6}
+        
+        D1 --> E
+        D2 --> E
+        D3 --> E
+        D4 --> E
+        
+        E(Thread Merge) -->|.toList| F[Processed List Output]
+    ```
 *   **Batched Database Inserts:** Writing records one by one to the database causes severe network and I/O bottlenecks. The `DatabaseManager` groups the processed and qualified transactions and executes batched inserts (`pstmt.addBatch()`, `pstmt.executeBatch()`), drastically improving throughput.
 
 ## Technical Design
@@ -41,7 +63,27 @@ The codebase strictly adheres to functional programming principles:
 *   **Functional Error Handling:** Interactions with the outside world (I/O, Database) are wrapped in `Try` monads. This allows the system to elegantly pattern match `Success` and `Failure` states without relying on traditional try-catch blocks.
 *   **Rule Abstraction:** A rule is defined as a tuple of two functions: a qualifier (returns a Boolean) and a calculator (returns a Double). This abstraction makes it trivial to add, remove, or modify rules without touching the core engine logic.
 
-## Project Structure
+## Component Architecture
+
+The codebase is organized into distinct functional modules, maintaining a clear separation of concerns between I/O operations, business logic, and data definitions.
+
+```mermaid
+graph TD
+    M[Main.scala\nOrchestrator] --> F[FileIO.scala\nStreaming & Logging]
+    M --> R[DiscountRules.scala\nBusiness Logic]
+    M --> DB[DatabaseManager.scala\nJDBC Connection]
+    
+    F -.-> D[Domain.scala\nCase Classes & Types]
+    R -.-> D
+    DB -.-> D
+    M -.-> D
+    
+    style M fill:#ffcc80,stroke:#e65100,stroke-width:2px
+    style D fill:#cfd8dc,stroke:#455a64,stroke-width:2px
+    style F fill:#bbdefb,stroke:#1976d2
+    style R fill:#bbdefb,stroke:#1976d2
+    style DB fill:#bbdefb,stroke:#1976d2
+```
 
 *   `Main.scala`: The application orchestrator. Coordinates file reading, parallel rule application, and database loading.
 *   `DiscountRules.scala`: The core logic container. Houses all the individual qualification and calculation rules, and the final discount aggregation logic.
