@@ -17,21 +17,24 @@ object Main {
   // Rule is a tuple of 2 functions, first one returns Bool (rule fit or not) and second returns Double (discount)
   type Rule = (Transaction => Boolean, Transaction => Double)
 
-  // Function to read the file, split by ',' cause it's CSV, and then close the source
-  def read(filePath: String): Try[List[Transaction]] = {
+  // Function to read the file in chunks, process, and avoid memory crashes
+  def processFileInChunks(filePath: String, chunkSize: Int = 10000)(processChunk: List[Transaction] => Unit): Try[Unit] = {
     Try {
       val source = Source.fromFile(filePath)
-      val lines = source.getLines().toList.drop(1).filter(_.trim.nonEmpty)
+      val lines = source.getLines().drop(1).filter(_.trim.nonEmpty)
 
-      val transactions = lines.flatMap { line =>
-        Try {
-          val columns = line.split(",")
-          Transaction(columns(0), columns(1), columns(2), columns(3).toInt, columns(4).toDouble, columns(5), columns(6))
-        }.toOption
+      lines.grouped(chunkSize).foreach { chunk =>
+        val transactions = chunk.flatMap { line =>
+          Try {
+            val columns = line.split(",")
+            Transaction(columns(0), columns(1), columns(2), columns(3).toInt, columns(4).toDouble, columns(5), columns(6))
+          }.toOption
+        }.toList
+
+        processChunk(transactions)
       }
 
       source.close()
-      transactions
     }
   }
 
@@ -145,47 +148,53 @@ object Main {
   //---------------------------------------------------------------------------------------------//
   // Orchestrator
   def main(args: Array[String]): Unit = {
+    logEvent("INFO", "Engine started for processing.")
 
-    // Read the file
-    val result = read("src/main/resources/TRX1000.csv")
+    val dbProcess = for {
+      conn <- DatabaseManager.getConnection()
+      _ <- DatabaseManager.initializeTables(conn)
+    } yield conn
 
-    // If transaction success, log it, calculate it's discount and get the final price
-    result match {
-      case Success(transactions) =>
-        logEvent("INFO", s"Successfully loaded ${transactions.length} transactions from CSV.")
+    dbProcess match {
+      case Success(conn) =>
+        logEvent("INFO", "Database connection secured and tables initialized.")
+        var totalProcessed = 0
+        var totalSaved = 0
 
-        val transactionsWithDiscounts = transactions.par.map { t =>
-          val finalDiscount = calculateFinalDiscount(t, rules)
-          val finalPrice = t.unitPrice - (t.unitPrice * finalDiscount)
+        val processResult = processFileInChunks("src/main/resources/TRX10M.csv", 10000) { chunk =>
+          val transactionsWithDiscounts = chunk.par.map { t =>
+            val finalDiscount = calculateFinalDiscount(t, rules)
+            val finalPrice = t.unitPrice - (t.unitPrice * finalDiscount)
 
-          if (finalDiscount > 0.0) {
-            logEvent("INFO", s"Transaction processed: ${t.productName} got a discount of ${finalDiscount * 100}%.")
+            if (finalDiscount > 0.0) {
+              logEvent("INFO", s"Transaction processed: ${t.productName} got a discount of ${finalDiscount * 100}%.")
+            }
+
+            t.copy(discount = finalDiscount, finalPrice = finalPrice)
+          }.toList
+
+          val discountedTransactionsOnly = transactionsWithDiscounts.filter(_.discount > 0.0)
+
+          DatabaseManager.saveTransactions(conn, discountedTransactionsOnly) match {
+            case Success(_) =>
+              totalProcessed += chunk.length
+              totalSaved += discountedTransactionsOnly.length
+            case Failure(e) =>
+              logEvent("ERROR", s"Failed to save chunk to DB: ${e.getMessage}")
           }
-
-          t.copy(discount = finalDiscount, finalPrice = finalPrice)
-        }.toList
-
-        val discountedTransactionsOnly = transactionsWithDiscounts.filter(_.discount > 0.0)
-
-        // DB connection
-        val dbProcess = for {
-          conn <- DatabaseManager.getConnection()
-          _ <- DatabaseManager.initializeTables(conn)
-          _ <- DatabaseManager.saveTransactions(conn, discountedTransactionsOnly)
-        } yield conn
-
-        // Log how many rows fit a rule and have been applied the calc
-        dbProcess match {
-          case Success(conn) =>
-            logEvent("INFO", s"Successfully inserted ${discountedTransactionsOnly.length} transactions into database.")
-            conn.close()
-
-          case Failure(exception) =>
-            logEvent("ERROR", s"Database Error: ${exception.getMessage}")
         }
 
+        processResult match {
+          case Success(_) =>
+            logEvent("INFO", s"COMPLETE! Total Processed: $totalProcessed | Total Saved: $totalSaved.")
+          case Failure(e) =>
+            logEvent("ERROR", s"File processing crashed: ${e.getMessage}")
+        }
+
+        conn.close()
+
       case Failure(exception) =>
-        logEvent("ERROR", s"Failed to read CSV: ${exception.getMessage}")
+        logEvent("ERROR", s"Initial Database Error: ${exception.getMessage}")
     }
   }
 }
